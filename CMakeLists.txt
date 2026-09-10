@@ -61,6 +61,12 @@ file(GLOB MGTK_CORE_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/c
 add_library(mgtk_core STATIC ${MGTK_CORE_SOURCES})
 target_include_directories(mgtk_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
+# The same archive is linked into the .aex/.plugin bundles, which are shared
+# objects, so its objects have to be position independent even though the
+# archive itself is static. Without this, linking a plug-in fails with
+# "relocation R_X86_64_PC32 ... can not be used when making a shared object".
+set_target_properties(mgtk_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # -----------------------------------------------------------------------------
 #  Tests
 # -----------------------------------------------------------------------------

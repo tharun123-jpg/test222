@@ -32,6 +32,11 @@ BUILD    := build
 CORE_SRC := $(sort $(wildcard src/core/*.cpp))
 CORE_OBJ := $(patsubst src/core/%.cpp,$(BUILD)/obj/core/%.o,$(CORE_SRC))
 
+# The core archive is linked into the .aex/.plugin bundles, which are shared
+# objects, so its objects must be position independent. -shared implies -fPIC
+# for sources compiled in the same command, but not for a prebuilt archive.
+PICFLAGS ?= -fPIC
+
 # test_ae_glue.cpp is built separately: it needs the AE headers, and the whole
 # point of the core suite is that it needs nothing but a compiler.
 TEST_SRC := $(filter-out tests/test_ae_glue.cpp,$(sort $(wildcard tests/*.cpp)))
@@ -53,7 +58,7 @@ all: $(TEST_BIN)
 
 $(BUILD)/obj/core/%.o: src/core/%.cpp
 	@mkdir -p $(@D)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(PICFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
 
 $(BUILD)/obj/tests/%.o: tests/%.cpp
 	@mkdir -p $(@D)
@@ -96,9 +101,14 @@ test-one: $(TEST_BIN)
 #  against the same static core, so the algorithms are shared and only the thin
 #  AE glue is duplicated.
 # -----------------------------------------------------------------------------
+# src/ae and src/ae/plugins must be on the include path: the plug-in
+# translation units in src/ae/plugins reach the shared glue with
+# #include "plugin_entry.hpp", and quoted includes only fall back to the
+# including file's own directory.
 AE_INCLUDES := -I$(AE_SDK_ROOT)/Examples/Headers \
                -I$(AE_SDK_ROOT)/Examples/Util         \
                -I$(AE_SDK_ROOT)/Examples/Headers/SP   \
+               -Isrc/ae -Isrc/ae/plugins               \
                $(INCLUDES)
 
 AE_COMMON_SRC := $(sort $(wildcard src/ae/*.cpp))
@@ -150,7 +160,7 @@ $(AE_OUT)/%.$(AE_EXT): src/ae/plugins/%.cpp $(AE_COMMON_OBJ) $(CORE_LIB) check-s
 plugins: gen-pipl $(patsubst %,$(AE_OUT)/%.$(AE_EXT),$(AE_PLUGIN_NAMES))
 	@echo "PiPL resources are in resources/pipl -- see docs/BUILDING.md for the"
 	@echo "platform step that attaches them to the binaries (pipltool on Windows,"
-	@echo "Rez on macOS). An effect without its resource will not appear in AE.")
+	@echo "Rez on macOS). An effect without its resource will not appear in AE."
 
 $(AE_OUT)/MotionGraphicsToolkit_AEGP.$(AE_EXT): $(AEGP_SRC) $(CORE_LIB) check-sdk
 	@mkdir -p $(@D)
