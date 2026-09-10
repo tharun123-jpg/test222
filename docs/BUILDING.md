@@ -140,9 +140,11 @@ The rules are:
 ```bash
 # macOS / Linux
 sudo ./scripts/install.sh
+```
 
-# Windows (elevated)
-scripts\install.bat
+```bat
+REM Windows, from an elevated prompt
+xcopy /Y /I build\plugins\*.aex "%ProgramFiles%\Adobe\Common\Plug-ins\7.0\MediaCore\"
 ```
 
 The `7.0` in the path is not the After Effects version — it is the plug-in API generation, and it
@@ -201,3 +203,48 @@ make test-glue   # only the glue suite
 This is the development loop worth using. It catches type errors, parameter-id mismatches,
 premultiply mistakes and protocol mistakes in a second, and leaves the SDK build for the things
 only the SDK can tell you about.
+
+---
+
+## Packaging a release (optional)
+
+```bash
+make release
+make release AE_SDK_ROOT=/path/to/AfterEffectsSDK
+```
+
+`make release` runs the test suite and stops if it fails, then packages into `dist/`:
+
+| File | Contents |
+|---|---|
+| `mgtk-<version>-<platform>.tar.gz` and `.zip` | `plugins/`, `resources/pipl/`, `docs/`, `scripts/`, `README.md`, `LICENSE`, `MANIFEST.txt` |
+| `mgtk-<version>-<platform>-src.tar.gz` | the source tree as git has it |
+| `SHA256SUMS` | checksums for both |
+
+Without `AE_SDK_ROOT` the package is source-only and says so at the end of the run: a release that
+quietly shipped bundles nobody compiled against Adobe's headers would be worse than no release.
+`MANIFEST.txt` inside the package records the SDK path, git revision, compiler and build flags, so
+any package can be traced back to what built it.
+
+The bundle builds go to `build/release/`, not `build/`, so a release is compiled with the release
+flags rather than reusing whatever development objects happen to be lying around.
+
+Two deliberate exclusions, both reversible by flag:
+
+- **The AEGP is not packaged.** Its keyframe read/write layer is unfinished ([AEGP.md](AEGP.md)).
+  `make release REL_WITH_AEGP=1` includes it.
+- **Nothing is stripped.** A shipped plug-in that crashes is worth far more with its symbols
+  intact, and these are small files.
+
+With CMake the same package comes from CPack, using one option per exclusion:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DAE_SDK_ROOT=/path/to/sdk
+cmake --build build
+cmake --build build --target release       # tarball + zip beside the build tree
+cmake --build build --target release-src
+```
+
+`-DMGTK_BUILD_AEGP=OFF` skips building the AEGP at all — worth knowing, because CPack's preinstall
+step builds every target, so a target that cannot compile (an incomplete SDK, say) will otherwise
+block packaging. `-DMGTK_PACKAGE_AEGP=ON` puts the AEGP into the package.

@@ -4,6 +4,13 @@
 build/
 build-*/
 cmake-build-*/
+# Release packages written by `make release` / `cpack`. These are outputs, not
+# sources: they are reproducible from a commit, and a stale tarball in the tree
+# is exactly the kind of thing that gets shipped by accident.
+dist/
+*.tar.gz
+*.zip
+
 *.o
 *.d
 *.a

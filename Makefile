@@ -192,6 +192,161 @@ gen-pipl: $(BUILD)/gen_pipl
 pipl: gen-pipl
 
 # -----------------------------------------------------------------------------
+#  Release packaging
+#
+#    make release                       -- tests + source archive + (with a real
+#                                          SDK) the plug-in binaries, tarred up
+#                                          in dist/
+#    make release AE_SDK_ROOT=/path/sdk -- the same, plus the built bundles
+#    make release-src                   -- source archive only
+#    make release-clean                 -- delete dist/
+#
+#  A release is gated on the test suite: packaging a tree whose own tests fail
+#  is not a release, it is a snapshot of a mistake. The binary half is gated on
+#  the real After Effects SDK, because a .aex linked against anything else is
+#  not something anyone should be able to install by accident -- if AE_SDK_ROOT
+#  is unset the release is source-only and says so in the manifest.
+# -----------------------------------------------------------------------------
+MGTK_VERSION := $(shell awk '/^#define MGTK_VERSION_MAJOR/{a=$$3} \
+                             /^#define MGTK_VERSION_MINOR/{b=$$3} \
+                             /^#define MGTK_VERSION_PATCH/{c=$$3} \
+                             END{print a"."b"."c}' include/mgtk/version.hpp)
+
+# Platform tag for the archive name. uname is the portable answer on macOS and
+# Linux; Windows make (MSYS, or nmake with a POSIX shim) may not have it, so
+# fall back to the OS/arch environment variables.
+ifneq ($(OS),Windows_NT)
+  REL_PLATFORM ?= $(shell uname -s | tr 'A-Z' 'a-z')-$(shell uname -m)
+else
+  REL_PLATFORM ?= windows-$(shell echo "$(PROCESSOR_ARCHITECTURE)" | tr 'A-Z' 'a-z')
+endif
+
+DIST      := dist
+REL_BUILD := $(BUILD)/release
+REL_AE_OUT := $(REL_BUILD)/plugins
+REL_NAME  := mgtk-$(MGTK_VERSION)-$(REL_PLATFORM)
+REL_DIR   := $(DIST)/$(REL_NAME)
+REL_TAR   := $(DIST)/$(REL_NAME).tar.gz
+REL_ZIP   := $(DIST)/$(REL_NAME).zip
+REL_SRC   := $(DIST)/$(REL_NAME)-src.tar.gz
+
+# -O2 is the default for hacking; a shipped build is -O3 with asserts off.
+RELEASE_OPT ?= -O3 -DNDEBUG
+
+# The SDK is present and looks like an SDK (not just a directory name).
+SDK_OK := $(shell test -n "$(AE_SDK_ROOT)" && \
+                test -d "$(AE_SDK_ROOT)/Examples/Headers" && echo yes)
+
+GIT_DESCRIBE := $(shell git describe --dirty --always --tags 2>/dev/null || echo unknown)
+
+.PHONY: release release-src release-bin release-clean release-check \
+        release-manifest release-checksums
+
+# $(if ...) rather than an ifdef/else, so that release-checksums runs last in
+# both cases -- it has to see the archives the other prerequisites just wrote.
+release: release-check release-src $(if $(SDK_OK),release-bin) release-checksums
+	@if [ -z "$(SDK_OK)" ]; then \
+	  echo ""; \
+	  echo "release: source archive only -- AE_SDK_ROOT is not set (or does not look"; \
+	  echo "         like an After Effects SDK), so no plug-in binaries were packaged."; \
+	  echo "         For an installable build: make release AE_SDK_ROOT=/path/to/sdk"; \
+	fi
+
+# The test gate. Runs before anything is written into dist/.
+release-check: test
+	@echo "release: test suite passed, packaging $(REL_NAME)"
+
+# Source archive straight out of git, so it contains exactly what the tag
+# contains and never a stray build artefact.
+release-src:
+	@mkdir -p $(DIST)
+	@if ! git diff --quiet HEAD 2>/dev/null; then \
+	  echo "release: WARNING -- working tree has uncommitted changes."; \
+	  echo "         git archive packages HEAD, so those changes are NOT in"; \
+	  echo "         $(REL_SRC). Commit them first if they belong in the release."; \
+	fi
+	git archive --format=tar.gz --prefix=$(REL_NAME)-src/ HEAD -o $(REL_SRC)
+	@echo "release: $(REL_SRC)"
+
+# The binary half. Requires the SDK; also re-runs the PiPL generator so the
+# resources in the package cannot drift from the registry they were built from.
+#
+# It builds into build/release rather than build/: release flags are different
+# from development flags, and reusing the objects already sitting in build/
+# would silently link an -O2 build into a package whose manifest claims -O3.
+#
+# REL_WITH_AEGP is off by default: the AEGP's keyframe read/write layer is not
+# written yet (see docs/AEGP.md), so a release would put one half-finished
+# plug-in next to eight finished ones. Set REL_WITH_AEGP=1 once that layer
+# exists and is tested.
+REL_WITH_AEGP ?= 0
+ifeq ($(REL_WITH_AEGP),1)
+  REL_AEGP_TARGETS := aegp
+  REL_AEGP_COPY := cp $(REL_AE_OUT)/MotionGraphicsToolkit_AEGP.$(AE_EXT) $(REL_DIR)/plugins/
+endif
+
+release-bin: gen-pipl
+	$(MAKE) --no-print-directory BUILD=$(REL_BUILD) OPT="$(RELEASE_OPT)" \
+	        plugins $(REL_AEGP_TARGETS) AE_SDK_ROOT=$(AE_SDK_ROOT)
+	@$(REL_AEGP_COPY)
+	@rm -rf $(REL_DIR)
+	@mkdir -p $(REL_DIR)/plugins $(REL_DIR)/resources/pipl $(REL_DIR)/docs $(REL_DIR)/scripts
+	@cp README.md LICENSE $(REL_DIR)/
+	@cp docs/*.md $(REL_DIR)/docs/
+	@cp scripts/install.sh scripts/build_windows.bat $(REL_DIR)/scripts/ 2>/dev/null || true
+	@cp resources/pipl/*.r $(REL_DIR)/resources/pipl/
+	@cp $(addprefix $(REL_AE_OUT)/,$(addsuffix .$(AE_EXT),$(AE_PLUGIN_NAMES))) \
+	    $(REL_DIR)/plugins/
+	@$(REL_AEGP_COPY)
+	@$(MAKE) --no-print-directory release-manifest
+	@tar -czf $(REL_TAR) -C $(DIST) $(REL_NAME)
+	@if command -v zip >/dev/null 2>&1; then \
+	   (cd $(DIST) && zip -qr $(REL_NAME).zip $(REL_NAME)); \
+	 else \
+	   echo "release: zip not installed -- $(REL_ZIP) not produced"; \
+	 fi
+	@$(MAKE) --no-print-directory release-checksums
+	@echo "release: $(REL_TAR)"
+
+# Records what is in the package and what it was built from. The AE_SDK_ROOT
+# line is the one that matters: it is how you tell later whether a given bundle
+# came from Adobe's headers or from the stand-in ones in tests/ae_shim.
+release-manifest:
+	@{ \
+	  echo "Motion Graphics Toolkit (MGTK) $(MGTK_VERSION)"; \
+	  echo "platform     : $(REL_PLATFORM)"; \
+	  echo "git revision : $(GIT_DESCRIBE)"; \
+	  echo "built        : `date -u '+%Y-%m-%dT%H:%M:%SZ'`"; \
+	  echo "compiler     : `$(CXX) --version 2>/dev/null | head -1`"; \
+	  echo "ae sdk       : $(AE_SDK_ROOT)"; \
+	  echo "build flags  : $(RELEASE_OPT)"; \
+	  echo ""; \
+	  echo "Contents"; \
+	  echo "--------"; \
+	  echo "  plugins/       built .$(AE_EXT) bundles (one code fragment per effect)"; \
+	  echo "  resources/pipl PiPL .r files -- attach with pipltool (Windows) or Rez"; \
+	  echo "                 (macOS) before the bundle will load; see docs/BUILDING.md"; \
+	  echo "  docs/          BUILDING.md, AEGP.md"; \
+	  echo "  scripts/       install.sh, build_windows.bat"; \
+	  echo ""; \
+	  echo "Install: copy plugins/* into the AE Plug-ins folder, then attach each"; \
+	  echo "PiPL resource to its bundle. scripts/install.sh does both on macOS."; \
+	} > $(REL_DIR)/MANIFEST.txt
+	@echo "release: $(REL_DIR)/MANIFEST.txt"
+
+release-checksums:
+	@cd $(DIST) && { \
+	  for f in $$(ls *.tar.gz *.zip 2>/dev/null); do \
+	    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$$f"; \
+	    else shasum -a 256 "$$f"; fi; \
+	  done; \
+	} > SHA256SUMS
+	@echo "release: $(DIST)/SHA256SUMS"
+
+release-clean:
+	rm -rf $(DIST)
+
+# -----------------------------------------------------------------------------
 #  Housekeeping
 # -----------------------------------------------------------------------------
 clean:
@@ -208,4 +363,12 @@ help:
 	@echo "  make gen-pipl    regenerate resources/pipl/*.r from the effect registry"
 	@echo "  make plugins AE_SDK_ROOT=/path/to/sdk   build the AE effects"
 	@echo "  make aegp AE_SDK_ROOT=/path/to/sdk      build the AEGP workflow companion"
+	@echo ""
+	@echo "  Release"
+	@echo "  make release     run the tests, then package dist/mgtk-<version>-<platform>"
+	@echo "                   (source archive always; plug-in binaries when AE_SDK_ROOT"
+	@echo "                   points at a real SDK)"
+	@echo "  make release-src     source archive only"
+	@echo "  make release-clean   delete dist/"
+	@echo ""
 	@echo "  make clean       remove everything under build/"

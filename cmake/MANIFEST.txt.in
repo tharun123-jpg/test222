@@ -1,0 +1,18 @@
+Motion Graphics Toolkit (MGTK) @PROJECT_VERSION@
+platform     : @MGTK_PLATFORM_OS@-@MGTK_PLATFORM_ARCH@
+git revision : @MGTK_GIT_REVISION@
+build type   : @CMAKE_BUILD_TYPE@
+compiler     : @CMAKE_CXX_COMPILER_ID@ @CMAKE_CXX_COMPILER_VERSION@
+ae sdk       : @AE_SDK_ROOT@
+build flags  : @MGTK_BUILD_FLAGS@
+
+Contents
+--------
+  plugins/       built @MGTK_AE_BUNDLE_SUFFIX@ bundles (one code fragment per effect)
+  resources/pipl PiPL .r files -- attach with pipltool (Windows) or Rez
+                 (macOS) before the bundle will load; see docs/BUILDING.md
+  docs/          BUILDING.md, AEGP.md
+  scripts/       install.sh, build_windows.bat
+
+Install: copy plugins/* into the AE Plug-ins folder, then attach each
+PiPL resource to its bundle. scripts/install.sh does both on macOS.

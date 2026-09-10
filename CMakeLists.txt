@@ -131,6 +131,9 @@ if(DEFINED AE_SDK_ROOT AND EXISTS "${AE_SDK_ROOT}/Examples/Headers")
   file(GLOB MGTK_EFFECT_SOURCES CONFIGURE_DEPENDS
        "${CMAKE_CURRENT_SOURCE_DIR}/src/ae/plugins/effect_*.cpp")
 
+  # Collected for the install/packaging rules further down.
+  set(MGTK_EFFECT_TARGETS "")
+
   if(APPLE)
     set(MGTK_BUNDLE_SUFFIX ".plugin")
   else()
@@ -164,10 +167,12 @@ if(DEFINED AE_SDK_ROOT AND EXISTS "${AE_SDK_ROOT}/Examples/Headers")
         COMMAND ${CMAKE_COMMAND} -E echo
                 "Attach resources/pipl/*.r to $<TARGET_FILE_NAME:${effect_name}> -- see docs/BUILDING.md"
         VERBATIM)
+
+    list(APPEND MGTK_EFFECT_TARGETS ${effect_name})
   endforeach()
 
   file(GLOB MGTK_AEGP_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/ae/aegp/*.cpp")
-  if(MGTK_AEGP_SOURCES)
+  if(MGTK_AEGP_SOURCES AND MGTK_BUILD_AEGP)
     add_library(MotionGraphicsToolkit_AEGP MODULE ${MGTK_AEGP_SOURCES})
     target_link_libraries(MotionGraphicsToolkit_AEGP PRIVATE mgtk_core)
     target_include_directories(MotionGraphicsToolkit_AEGP PRIVATE
@@ -176,6 +181,8 @@ if(DEFINED AE_SDK_ROOT AND EXISTS "${AE_SDK_ROOT}/Examples/Headers")
         "${AE_SDK_ROOT}/Examples/Headers/SP")
     set_target_properties(MotionGraphicsToolkit_AEGP PROPERTIES
         PREFIX "" SUFFIX "${MGTK_BUNDLE_SUFFIX}")
+  elseif(MGTK_AEGP_SOURCES)
+    message(STATUS "MGTK_BUILD_AEGP is OFF; the AEGP companion will not be built")
   endif()
 elseif(DEFINED AE_SDK_ROOT)
   message(WARNING "AE_SDK_ROOT is set to '${AE_SDK_ROOT}' but ${AE_SDK_ROOT}/Examples/Headers "
@@ -197,4 +204,154 @@ if(TARGET gen_pipl)
       COMMAND gen_pipl "${CMAKE_CURRENT_SOURCE_DIR}/resources/pipl"
       DEPENDS gen_pipl
       COMMENT "Regenerating resources/pipl from the effect registry")
+endif()
+
+# -----------------------------------------------------------------------------
+#  Release packaging
+#
+#    cmake --build build --target release       -- plug-ins + resources + docs,
+#                                                  packed with CPack
+#    cmake --build build --target release-src   -- source archive
+#
+#  The package name matches the Makefile's, so a release built either way lands
+#  on the same filename. CPack writes into the build directory; the Makefile
+#  writes into dist/. Both produce a tarball and a zip with the same layout.
+#
+#  Unlike the Makefile's `make release`, this path cannot gate itself on the
+#  test suite (CPack packages what was built, and the build may not have been
+#  asked for the tests). Run `ctest` first if you want that gate:
+#
+#    cmake --build build && ctest --test-dir build && cmake --build build --target release
+# -----------------------------------------------------------------------------
+option(MGTK_ENABLE_RELEASE "Configure CPack and the release targets" ON)
+option(MGTK_BUILD_AEGP "Build the AEGP workflow companion (needs the full SDK, not just the effect headers)" ON)
+
+# Off by default, and deliberately so: the AEGP's keyframe read/write layer is
+# not written yet (see docs/AEGP.md), so shipping it in a package would put a
+# half-finished plug-in next to eight finished ones. Turn this on only if you
+# have finished that layer and want it released.
+option(MGTK_PACKAGE_AEGP "Include the AEGP in the release package" OFF)
+
+string(TOLOWER "${CMAKE_SYSTEM_NAME}" MGTK_PLATFORM_OS)
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" MGTK_PLATFORM_ARCH)
+set(MGTK_PACKAGE_FILE_NAME
+    "mgtk-${PROJECT_VERSION}-${MGTK_PLATFORM_OS}-${MGTK_PLATFORM_ARCH}")
+
+# What went into this build, and what it was built from. The SDK line is the
+# one that matters: it is how you tell later whether a bundle came from Adobe's
+# headers or from the stand-in ones in tests/ae_shim.
+find_package(Git QUIET)
+if(GIT_FOUND)
+  execute_process(COMMAND "${GIT_EXECUTABLE}" describe --dirty --always --tags
+                  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                  OUTPUT_VARIABLE MGTK_GIT_REVISION
+                  OUTPUT_STRIP_TRAILING_WHITESPACE
+                  ERROR_QUIET)
+endif()
+if(NOT MGTK_GIT_REVISION)
+  set(MGTK_GIT_REVISION "unknown")
+endif()
+if(NOT DEFINED AE_SDK_ROOT)
+  set(AE_SDK_ROOT "(not set -- core and tests only, no plug-in binaries)")
+endif()
+set(MGTK_AE_BUNDLE_SUFFIX "${MGTK_BUNDLE_SUFFIX}")
+if(NOT MGTK_AE_BUNDLE_SUFFIX)
+  set(MGTK_AE_BUNDLE_SUFFIX ".aex")
+endif()
+
+# The per-configuration flags live in a variable whose *name* depends on the
+# configuration, so it takes two steps to read them, and the configuration has
+# to be upper-cased first: the cache holds CMAKE_CXX_FLAGS_RELEASE, so a plain
+# "CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE}" looks up CMAKE_CXX_FLAGS_Release, finds
+# nothing, and reports empty flags with no error anywhere.
+if(CMAKE_BUILD_TYPE)
+  string(TOUPPER "${CMAKE_BUILD_TYPE}" MGTK_BUILD_TYPE_UPPER)
+  set(MGTK_FLAGS_VAR "CMAKE_CXX_FLAGS_${MGTK_BUILD_TYPE_UPPER}")
+  set(MGTK_BUILD_FLAGS "${CMAKE_CXX_FLAGS} ${${MGTK_FLAGS_VAR}}")
+else()
+  set(MGTK_BUILD_FLAGS "${CMAKE_CXX_FLAGS} (multi-config generator: see CMakeCache.txt for per-configuration flags)")
+endif()
+
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/MANIFEST.txt.in"
+               "${CMAKE_BINARY_DIR}/MANIFEST.txt" @ONLY)
+
+# Install rules are always configured, not only when CPack is enabled: they are
+# what `cmake --install` uses, and the docs, scripts and PiPL resources are
+# worth installing even on a machine that never builds a plug-in.
+# Layout of the package: the same four directories the Makefile produces, so
+# the two release paths are interchangeable to whoever installs one.
+if(MGTK_EFFECT_TARGETS)
+  install(TARGETS ${MGTK_EFFECT_TARGETS}
+          LIBRARY DESTINATION plugins
+          RUNTIME DESTINATION plugins
+          BUNDLE  DESTINATION plugins)
+endif()
+if(TARGET MotionGraphicsToolkit_AEGP AND MGTK_PACKAGE_AEGP)
+  install(TARGETS MotionGraphicsToolkit_AEGP
+          LIBRARY DESTINATION plugins
+          RUNTIME DESTINATION plugins
+          BUNDLE  DESTINATION plugins)
+elseif(TARGET MotionGraphicsToolkit_AEGP)
+  message(STATUS "AEGP built but not packaged (MGTK_PACKAGE_AEGP is OFF); "
+                 "set -DMGTK_PACKAGE_AEGP=ON to include it")
+endif()
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/resources/pipl/"
+        DESTINATION resources/pipl
+        FILES_MATCHING PATTERN "*.r")
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
+              "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+              "${CMAKE_BINARY_DIR}/MANIFEST.txt"
+        DESTINATION .)
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/docs/"
+        DESTINATION docs
+        FILES_MATCHING PATTERN "*.md")
+install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/scripts/install.sh"
+        DESTINATION scripts)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/scripts/build_windows.bat"
+        DESTINATION scripts)
+
+if(MGTK_ENABLE_RELEASE)
+  set(CPACK_PACKAGE_NAME "Motion Graphics Toolkit")
+  set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+      "Motion graphics effects and keyframe generators for Adobe After Effects")
+  set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+  set(CPACK_PACKAGE_FILE_NAME "${MGTK_PACKAGE_FILE_NAME}")
+  set(CPACK_GENERATOR "TGZ;ZIP")
+  set(CPACK_SOURCE_GENERATOR "TGZ")
+  set(CPACK_SOURCE_PACKAGE_FILE_NAME "${MGTK_PACKAGE_FILE_NAME}-src")
+  set(CPACK_SOURCE_IGNORE_FILES
+      "/build/;/\\.git/;/dist/;\\\\.aex$;\\\\.plugin$;\\\\.o$")
+  set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY ON)
+
+  include(CPack)
+
+  # Everything that can be packaged. Tests are not in the package but are built
+  # here so that `--target release` cannot succeed on a tree that does not
+  # compile.
+  set(MGTK_RELEASE_DEPS mgtk_core)
+  if(TARGET mgtk_tests)
+    list(APPEND MGTK_RELEASE_DEPS mgtk_tests)
+  endif()
+  if(TARGET mgtk_glue_tests)
+    list(APPEND MGTK_RELEASE_DEPS mgtk_glue_tests)
+  endif()
+  if(TARGET gen_pipl)
+    list(APPEND MGTK_RELEASE_DEPS gen_pipl)
+  endif()
+  list(APPEND MGTK_RELEASE_DEPS ${MGTK_EFFECT_TARGETS})
+
+  add_custom_target(release
+      COMMAND "${CMAKE_COMMAND}" -E echo
+              "Packaging ${MGTK_PACKAGE_FILE_NAME} with CPack into ${CMAKE_BINARY_DIR}"
+      COMMAND "${CMAKE_CPACK_COMMAND}" --config "${CMAKE_BINARY_DIR}/CPackConfig.cmake"
+      DEPENDS ${MGTK_RELEASE_DEPS}
+      WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+      COMMENT "Packaging a release")
+
+  add_custom_target(release-src
+      COMMAND "${CMAKE_COMMAND}" -E echo
+              "Packaging the source tree with CPack into ${CMAKE_BINARY_DIR}"
+      COMMAND "${CMAKE_CPACK_COMMAND}" --config "${CMAKE_BINARY_DIR}/CPackSourceConfig.cmake"
+      WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+      COMMENT "Packaging a source release")
 endif()

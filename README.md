@@ -99,9 +99,52 @@ it differs enough between Windows and macOS to be worth its own page:
 | macOS | `/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/` |
 | Windows | `C:\Program Files\Adobe\Common\Plug-ins\7.0\MediaCore\` |
 
-`scripts/install.sh` (macOS/Linux) and `scripts/install.bat` (Windows) copy the built bundles
-there. After Effects must be restarted; the effects then appear under
+`scripts/install.sh` copies the built bundles there on macOS and Linux. On Windows the copy is
+elevated `xcopy`:
+
+```bat
+xcopy /Y /I build\plugins\*.aex "%ProgramFiles%\Adobe\Common\Plug-ins\7.0\MediaCore\"
+```
+
+After Effects must be restarted; the effects then appear under
 **Effects & Presets → Motion Graphics Toolkit**.
+
+### Packaging a release
+
+```bash
+make release                              # tests, then a source archive
+make release AE_SDK_ROOT=/path/to/sdk     # ...and the eight built bundles
+```
+
+`make release` runs the test suite first — packaging a tree whose own tests fail is not a
+release. It writes into `dist/`:
+
+| File | What it is |
+|---|---|
+| `mgtk-<version>-<platform>.tar.gz` / `.zip` | `plugins/`, `resources/pipl/`, `docs/`, `scripts/`, `README.md`, `LICENSE`, `MANIFEST.txt` |
+| `mgtk-<version>-<platform>-src.tar.gz` | the source tree, straight out of git |
+| `SHA256SUMS` | checksums for both |
+
+The binary half needs the real SDK. Without `AE_SDK_ROOT` the release is source-only and says so,
+rather than packaging bundles that were never compiled against Adobe's headers — and `MANIFEST.txt`
+records the SDK path, git revision, compiler and flags it was built with, so a package can always
+be traced back to what produced it.
+
+The AEGP companion is deliberately **not** in the package: its keyframe read/write layer is
+unfinished ([docs/AEGP.md](docs/AEGP.md)), and shipping it next to eight finished effects would be
+misleading. `make release REL_WITH_AEGP=1` includes it if you have finished that layer.
+
+With CMake, using CPack:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DAE_SDK_ROOT=/path/to/sdk
+cmake --build build
+cmake --build build --target release       # tarball + zip, beside the build tree
+cmake --build build --target release-src   # source archive
+```
+
+`-DMGTK_BUILD_AEGP=OFF` skips the AEGP, and `-DMGTK_PACKAGE_AEGP=ON` puts it in the package if
+you want it.
 
 ---
 
