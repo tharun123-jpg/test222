@@ -1,0 +1,12 @@
+# Build output. Never commit compiled artefacts: the plug-ins are rebuilt from
+# source by `make` or CMake, and a stale .aex in the tree is a support ticket
+# waiting to happen.
+build/
+build-*/
+cmake-build-*/
+*.o
+*.d
+*.a
+*.aex
+*.plugin
+.DS_Store
