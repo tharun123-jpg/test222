@@ -32,13 +32,22 @@ BUILD    := build
 CORE_SRC := $(sort $(wildcard src/core/*.cpp))
 CORE_OBJ := $(patsubst src/core/%.cpp,$(BUILD)/obj/core/%.o,$(CORE_SRC))
 
-TEST_SRC := $(sort $(wildcard tests/*.cpp))
+# test_ae_glue.cpp is built separately: it needs the AE headers, and the whole
+# point of the core suite is that it needs nothing but a compiler.
+TEST_SRC := $(filter-out tests/test_ae_glue.cpp,$(sort $(wildcard tests/*.cpp)))
 TEST_OBJ := $(patsubst tests/%.cpp,$(BUILD)/obj/tests/%.o,$(TEST_SRC))
 
 CORE_LIB := $(BUILD)/libmgtk_core.a
 TEST_BIN := $(BUILD)/mgtk_tests
 
-.PHONY: all test clean help plugins aegp check-sdk
+# The glue suite runs the real dispatcher and the real effect registry against
+# the stand-in host in tests/ae_shim. It is the closest thing to an After
+# Effects install that this repository can have, and it is why the plug-in code
+# is worth trusting at all before the SDK build.
+GLUE_TEST_BIN := $(BUILD)/mgtk_glue_tests
+GLUE_INCLUDES := -Isrc/ae -Itests/ae_shim -Isrc/ae/plugins
+
+.PHONY: all test test-glue clean help plugins aegp check-sdk pipl gen-pipl
 
 all: $(TEST_BIN)
 
@@ -58,8 +67,20 @@ $(TEST_BIN): $(TEST_OBJ) $(CORE_LIB)
 	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) $(TEST_OBJ) $(CORE_LIB) -o $@
 
-test: $(TEST_BIN)
+$(GLUE_TEST_BIN): tests/test_ae_glue.cpp tests/ae_shim/host.cpp $(CORE_SRC) $(wildcard src/ae/*.cpp) $(wildcard src/ae/plugins/*.cpp)
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -Itests $(GLUE_INCLUDES) \
+	  $(CORE_SRC) $(wildcard src/ae/*.cpp) tests/test_main.cpp tests/test_ae_glue.cpp \
+	  tests/ae_shim/host.cpp -o $@
+
+test: $(TEST_BIN) $(GLUE_TEST_BIN)
 	@./$(TEST_BIN)
+	@echo ""
+	@./$(GLUE_TEST_BIN)
+
+# The glue suite on its own, for when you are editing src/ae.
+test-glue: $(GLUE_TEST_BIN)
+	@./$(GLUE_TEST_BIN)
 
 # Run one effect's tests:  make test-one F=halftone
 test-one: $(TEST_BIN)
@@ -124,7 +145,12 @@ $(AE_OUT)/%.$(AE_EXT): src/ae/plugins/%.cpp $(AE_COMMON_OBJ) $(CORE_LIB) check-s
 	$(CXX) $(CXXFLAGS) $(AE_INCLUDES) $(AE_LDFLAGS) $< $(AE_COMMON_OBJ) \
 	  $(CORE_LIB) -o $@
 
-plugins: $(patsubst %,$(AE_OUT)/%.$(AE_EXT),$(AE_PLUGIN_NAMES))
+# The PiPL resources are regenerated first: they carry the out-flags that must
+# match what the plug-ins report at PF_Cmd_GLOBAL_SETUP time.
+plugins: gen-pipl $(patsubst %,$(AE_OUT)/%.$(AE_EXT),$(AE_PLUGIN_NAMES))
+	@echo "PiPL resources are in resources/pipl -- see docs/BUILDING.md for the"
+	@echo "platform step that attaches them to the binaries (pipltool on Windows,"
+	@echo "Rez on macOS). An effect without its resource will not appear in AE.")
 
 $(AE_OUT)/MotionGraphicsToolkit_AEGP.$(AE_EXT): $(AEGP_SRC) $(CORE_LIB) check-sdk
 	@mkdir -p $(@D)
@@ -132,6 +158,28 @@ $(AE_OUT)/MotionGraphicsToolkit_AEGP.$(AE_EXT): $(AEGP_SRC) $(CORE_LIB) check-sd
 	  $(CORE_LIB) -o $@
 
 aegp: $(AE_OUT)/MotionGraphicsToolkit_AEGP.$(AE_EXT)
+
+# -----------------------------------------------------------------------------
+#  PiPL resources
+#
+#  tools/gen_pipl reads the effect registry -- the same table the plug-ins use
+#  at runtime -- and writes one .r per effect into resources/pipl. This is what
+#  keeps the out-flags in the resource files identical to the ones
+#  PF_Cmd_GLOBAL_SETUP reports: AE refuses to load a plug-in whose PiPL and
+#  global setup disagree, and the disagreeing values are impossible to spot by
+#  eye because PF_OutFlag_* are enums, not macros, so a .r file cannot even
+#  spell the expression.
+# -----------------------------------------------------------------------------
+$(BUILD)/gen_pipl: tools/gen_pipl.cpp tools/ae_shim_stubs.cpp src/ae/registry.cpp \
+                   src/ae/mgtk_ae.cpp src/ae/effect_spec.hpp src/ae/effect_registry.hpp $(CORE_LIB)
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -Isrc/ae -Itests/ae_shim tools/gen_pipl.cpp \
+	  tools/ae_shim_stubs.cpp src/ae/registry.cpp src/ae/mgtk_ae.cpp $(CORE_LIB) -o $@
+
+gen-pipl: $(BUILD)/gen_pipl
+	@./$(BUILD)/gen_pipl resources/pipl
+
+pipl: gen-pipl
 
 # -----------------------------------------------------------------------------
 #  Housekeeping
@@ -146,6 +194,8 @@ help:
 	@echo "  make             build the core library and the test suite"
 	@echo "  make test        build and run every core unit test"
 	@echo "  make test-one F=blur    run only tests whose name contains 'blur'"
+	@echo "  make test-glue   build and run only the After Effects glue tests"
+	@echo "  make gen-pipl    regenerate resources/pipl/*.r from the effect registry"
 	@echo "  make plugins AE_SDK_ROOT=/path/to/sdk   build the AE effects"
 	@echo "  make aegp AE_SDK_ROOT=/path/to/sdk      build the AEGP workflow companion"
 	@echo "  make clean       remove everything under build/"
